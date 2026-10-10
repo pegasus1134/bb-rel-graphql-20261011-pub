@@ -1,0 +1,60 @@
+name: Owned relation boundary check
+on:
+  workflow_dispatch:
+permissions:
+  issues: read
+jobs:
+  read-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare direct and relationship reads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          def graphql(query):
+              payload = json.dumps({"query": query}).encode()
+              request = urllib.request.Request(
+                  "https://api.github.com/graphql",
+                  data=payload,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2026-03-10",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as error:
+                  return error.code, {}
+
+          direct_query = '''query { repository(owner:"pegasus1134", name:"bb-rel-graphql-20261011-priv") { issue(number:1) { body } } }'''
+          direct_status, direct = graphql(direct_query)
+          direct_repo = direct.get("data", {}).get("repository")
+          direct_denied = direct_status in (401, 403, 404) or direct_repo is None or direct_repo.get("issue") is None
+
+          relation_query = '''query { repository(owner:"pegasus1134", name:"bb-rel-graphql-20261011-pub") { issue(number:1) { relatesTo(first:10) { nodes { body repository { isPrivate nameWithOwner } } } } } }'''
+          relation_status, relation = graphql(relation_query)
+          public_repo = relation.get("data", {}).get("repository") or {}
+          public_issue = public_repo.get("issue") or {}
+          related = public_issue.get("relatesTo") or {}
+          nodes = related.get("nodes") or []
+          private_bodies = [node.get("body") for node in nodes if node and (node.get("repository") or {}).get("isPrivate")]
+          body_hashes = [hashlib.sha256(body.encode()).hexdigest() for body in private_bodies if isinstance(body, str)]
+          expected_hash = "697156b867ebb625282f115da60333cffde522d09859c20d1bcba18d98a770e7"
+
+          print("direct_http_status=" + str(direct_status))
+          print("direct_private_denied=" + str(direct_denied).lower())
+          print("relation_http_status=" + str(relation_status))
+          print("private_relation_node_count=" + str(len(private_bodies)))
+          print("private_body_hash_match=" + str(expected_hash in body_hashes).lower())
+          PY
